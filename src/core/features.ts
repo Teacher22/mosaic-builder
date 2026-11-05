@@ -5,13 +5,16 @@ import { srgbByteToOklab } from './color';
 const DIVISIONS = 3;
 
 /**
- * Average OKLab of each cell in a DIVISIONS x DIVISIONS grid over the
- * image, flattened row-major into a single Float32Array of length
- * DIVISIONS*DIVISIONS*3. OKLab gives perceptually meaningful distances
- * (close in colour-space == looks close), unlike raw sRGB averages.
+ * Average OKLab of each cell in a DIVISIONS x DIVISIONS grid over a region
+ * of a larger RGBA image, flattened row-major into DIVISIONS*DIVISIONS*3
+ * floats. OKLab gives perceptually meaningful distances (close in
+ * colour-space == looks close), unlike raw sRGB averages.
  */
-export function computeFeatures(
+export function computeRegionFeatures(
   data: Uint8ClampedArray,
+  stride: number,
+  x0: number,
+  y0: number,
   width: number,
   height: number,
 ): Float32Array {
@@ -23,7 +26,7 @@ export function computeFeatures(
     for (let x = 0; x < width; x++) {
       const gx = Math.min(DIVISIONS - 1, Math.floor((x / width) * DIVISIONS));
       const cell = gy * DIVISIONS + gx;
-      const p = (y * width + x) * 4;
+      const p = ((y0 + y) * stride + x0 + x) * 4;
       const [L, a, b] = srgbByteToOklab(data[p], data[p + 1], data[p + 2]);
       const base = cell * 3;
       out[base] += L;
@@ -42,6 +45,34 @@ export function computeFeatures(
   }
 
   return out;
+}
+
+export function computeFeatures(data: Uint8ClampedArray, width: number, height: number): Float32Array {
+  return computeRegionFeatures(data, width, 0, 0, width, height);
+}
+
+/** Standard deviation of brightness in a region: how much visual detail a tile there has to carry. */
+export function regionDetail(
+  data: Uint8ClampedArray,
+  stride: number,
+  x0: number,
+  y0: number,
+  width: number,
+  height: number,
+): number {
+  let sum = 0;
+  let sumSquares = 0;
+  for (let y = y0; y < y0 + height; y++) {
+    for (let x = x0; x < x0 + width; x++) {
+      const p = (y * stride + x) * 4;
+      const luma = 0.2126 * data[p] + 0.7152 * data[p + 1] + 0.0722 * data[p + 2];
+      sum += luma;
+      sumSquares += luma * luma;
+    }
+  }
+  const n = Math.max(1, width * height);
+  const mean = sum / n;
+  return Math.sqrt(Math.max(0, sumSquares / n - mean * mean));
 }
 
 export const FEATURE_LENGTH = DIVISIONS * DIVISIONS * 3;
@@ -65,19 +96,4 @@ export function weightFeatures(features: ArrayLike<number>, meanWeight: number):
     }
   }
   return out;
-}
-
-/** Plain sRGB average (0..255 per channel) over a whole region, for drawing/colour-correct. */
-export function computeAverageColor(data: Uint8ClampedArray, width: number, height: number): [number, number, number] {
-  let r = 0;
-  let g = 0;
-  let b = 0;
-  const n = width * height;
-  for (let i = 0; i < n; i++) {
-    const p = i * 4;
-    r += data[p];
-    g += data[p + 1];
-    b += data[p + 2];
-  }
-  return [r / n, g / n, b / n];
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { srgbByteToOklab } from '../src/core/color';
-import { computeAverageColor, computeFeatures, FEATURE_LENGTH } from '../src/core/features';
+import { computeFeatures, FEATURE_LENGTH } from '../src/core/features';
 
 function solidImage(width: number, height: number, [r, g, b]: [number, number, number]): Uint8ClampedArray {
   const data = new Uint8ClampedArray(width * height * 4);
@@ -48,24 +48,5 @@ describe('computeFeatures', () => {
     for (let cell = 1; cell < 9; cell++) {
       expect(features[cell * 3]).toBeGreaterThan(features[(cell - 1) * 3]);
     }
-  });
-});
-
-describe('computeAverageColor', () => {
-  it('averages a solid colour exactly', () => {
-    const data = solidImage(10, 10, [10, 20, 30]);
-    expect(computeAverageColor(data, 10, 10)).toEqual([10, 20, 30]);
-  });
-
-  it('averages two halves', () => {
-    const width = 4;
-    const height = 1;
-    const data = new Uint8ClampedArray(width * height * 4);
-    // Left half black, right half white.
-    data.set([0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255]);
-    const [r, g, b] = computeAverageColor(data, width, height);
-    expect(r).toBeCloseTo(127.5, 5);
-    expect(g).toBeCloseTo(127.5, 5);
-    expect(b).toBeCloseTo(127.5, 5);
   });
 });

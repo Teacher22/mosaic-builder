@@ -1,89 +1,103 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Button, Chip, Stack, Typography, LinearProgress, Alert, AlertTitle, Tooltip } from '@mui/material';
-import PhotoLibraryOutlinedIcon from '@mui/icons-material/PhotoLibraryOutlined';
+import { Alert, Box, Button, Chip, Collapse, LinearProgress, Stack, Tooltip, Typography } from '@mui/material';
+import { motion } from 'framer-motion';
+import AddPhotoAlternateOutlinedIcon from '@mui/icons-material/AddPhotoAlternateOutlined';
 import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
-import DeleteSweepOutlinedIcon from '@mui/icons-material/DeleteSweepOutlined';
 import { useMosaicStore } from '../hooks/useMosaicStore';
 import { useWorkers } from '../hooks/useWorkers';
 import { clearCache } from '../../store/cache';
+import { filesFromDrop, isImageFile } from '../files';
 
-function isImageFile(file: File): boolean {
-  return file.type.startsWith('image/') || /\.(heic|heif)$/i.test(file.name);
-}
+const THUMB_STRIP_LIMIT = 24;
 
-const THUMB_STRIP_LIMIT = 40;
-
-function ThumbnailStrip({ files }: { files: File[] }) {
-  // Object URLs are a side effect, so they're created/revoked from an
-  // effect (not useMemo, which React may invoke more than once per commit
-  // under StrictMode/concurrent rendering and would leave <img> pointed at
-  // an already-revoked blob URL).
+function ThumbnailStrip() {
+  const tiles = useMosaicStore((s) => s.tiles);
+  const shown = useMemo(() => tiles.slice(0, THUMB_STRIP_LIMIT), [tiles]);
   const [urls, setUrls] = useState<string[]>([]);
+  // Object URLs are a side effect: creating them in useMemo can leave <img>
+  // pointing at a revoked URL under StrictMode.
   useEffect(() => {
-    const created = files.slice(0, THUMB_STRIP_LIMIT).map((f) => URL.createObjectURL(f));
+    const created = shown.map((t) => URL.createObjectURL(t.thumb));
     setUrls(created);
     return () => created.forEach((u) => URL.revokeObjectURL(u));
-  }, [files]);
+  }, [shown]);
 
   return (
-    <Stack direction="row" spacing={0.5} sx={{ overflowX: 'auto', pb: 0.5 }}>
+    <Box sx={{ display: 'flex', gap: 0.5, overflowX: 'auto', pb: 0.5, scrollbarWidth: 'thin' }}>
       {urls.map((url, i) => (
-        <Box
-          key={i}
-          component="img"
+        <motion.img
+          key={url}
           src={url}
           alt=""
-          sx={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 1, flexShrink: 0, bgcolor: 'action.hover' }}
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ duration: 0.25, delay: Math.min(i, 12) * 0.02 }}
+          style={{ width: 38, height: 38, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }}
         />
       ))}
-      {files.length > THUMB_STRIP_LIMIT && (
+      {tiles.length > THUMB_STRIP_LIMIT && (
         <Box
           sx={{
-            width: 40,
-            height: 40,
+            minWidth: 38,
+            height: 38,
+            px: 0.5,
             flexShrink: 0,
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            borderRadius: 1,
+            borderRadius: '6px',
             bgcolor: 'action.hover',
             fontSize: 11,
             color: 'text.secondary',
           }}
         >
-          +{files.length - THUMB_STRIP_LIMIT}
+          +{(tiles.length - THUMB_STRIP_LIMIT).toLocaleString()}
         </Box>
       )}
-    </Stack>
+    </Box>
   );
 }
 
 export function PhotoDropzone() {
-  const { analyzePhotos } = useWorkers();
-  const tiles = useMosaicStore((s) => s.tiles);
+  const { analyzePhotos, clearAllPhotos } = useWorkers();
+  const tileCount = useMosaicStore((s) => s.tiles.length);
   const analyzing = useMosaicStore((s) => s.analyzing);
-  const analyzeProgress = useMosaicStore((s) => s.analyzeProgress);
+  const progress = useMosaicStore((s) => s.analyzeProgress);
   const skippedFiles = useMosaicStore((s) => s.skippedFiles);
   const cacheHits = useMosaicStore((s) => s.cacheHits);
-  const clearPhotos = useMosaicStore((s) => s.clearPhotos);
   const addLog = useMosaicStore((s) => s.addLog);
+  const setToast = useMosaicStore((s) => s.setToast);
   const [dragOver, setDragOver] = useState(false);
+  const [showSkipped, setShowSkipped] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   const handleFiles = useCallback(
-    (fileList: FileList | File[]) => {
-      const files = Array.from(fileList).filter(isImageFile);
-      if (files.length > 0) analyzePhotos(files);
+    (files: File[]) => {
+      const images = files.filter(isImageFile);
+      if (images.length > 0) analyzePhotos(images);
+      else if (files.length > 0) setToast({ severity: 'info', message: 'No image files found there.' });
     },
-    [analyzePhotos],
+    [analyzePhotos, setToast],
+  );
+
+  const handleInputFiles = useCallback(
+    (input: HTMLInputElement) => {
+      const files = Array.from(input.files ?? []);
+      // Reset so re-selecting the exact same file(s) still fires change.
+      input.value = '';
+      // The browser just spent a while building the file list in this same task; yield first so the page never stalls.
+      setTimeout(() => handleFiles(files));
+    },
+    [handleFiles],
   );
 
   const onDrop = useCallback(
     (e: React.DragEvent<HTMLDivElement>) => {
       e.preventDefault();
+      e.stopPropagation();
       setDragOver(false);
-      handleFiles(e.dataTransfer.files);
+      filesFromDrop(e.dataTransfer).then(handleFiles);
     },
     [handleFiles],
   );
@@ -91,34 +105,51 @@ export function PhotoDropzone() {
   const handleClearCache = useCallback(async () => {
     await clearCache();
     addLog('info', 'Cleared the photo analysis cache.');
-  }, [addLog]);
+    setToast({ severity: 'success', message: 'Cache cleared.' });
+  }, [addLog, setToast]);
 
-  const tileFiles = useMemo(() => tiles.map((t) => t.file), [tiles]);
+  const hasPhotos = tileCount > 0 || skippedFiles.length > 0;
 
   return (
-    <Stack spacing={1.5}>
+    <Stack spacing={1.25}>
       <Box
+        role="button"
+        tabIndex={0}
+        aria-label="Add photos"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            inputRef.current?.click();
+          }
+        }}
         onDragOver={(e) => {
           e.preventDefault();
+          e.stopPropagation();
           setDragOver(true);
         }}
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
         onClick={() => inputRef.current?.click()}
         sx={{
-          border: '2px dashed',
+          border: '1.5px dashed',
           borderColor: dragOver ? 'primary.main' : 'divider',
-          borderRadius: 3,
-          p: 3,
-          textAlign: 'center',
+          borderRadius: 1.5,
+          py: hasPhotos ? 1.25 : 3,
+          px: 2,
+          display: 'flex',
+          flexDirection: hasPhotos ? 'row' : 'column',
+          gap: 1,
+          alignItems: 'center',
+          justifyContent: 'center',
           cursor: 'pointer',
-          bgcolor: dragOver ? 'action.hover' : 'transparent',
-          transition: 'border-color 120ms, background-color 120ms',
+          bgcolor: dragOver ? 'action.selected' : 'transparent',
+          transition: 'all 140ms',
+          '&:hover': { borderColor: 'primary.main', bgcolor: 'action.hover' },
         }}
       >
-        <PhotoLibraryOutlinedIcon sx={{ fontSize: 36, color: 'text.secondary', mb: 1 }} />
-        <Typography variant="body2" color="text.secondary">
-          Drag photos here, or click to browse
+        <AddPhotoAlternateOutlinedIcon sx={{ fontSize: hasPhotos ? 20 : 30, color: 'primary.main' }} />
+        <Typography variant="body2" color="text.secondary" textAlign="center">
+          {hasPhotos ? 'Add more photos' : 'Drop photos or a folder, or click to browse'}
         </Typography>
         <input
           ref={inputRef}
@@ -126,23 +157,13 @@ export function PhotoDropzone() {
           accept="image/*,.heic,.heif"
           multiple
           hidden
+          onClick={(e) => e.stopPropagation()}
           onChange={(e) => {
-            if (e.target.files) handleFiles(e.target.files);
-            // Reset so re-selecting the exact same file(s) still fires change.
-            e.target.value = '';
+            handleInputFiles(e.target);
           }}
         />
       </Box>
 
-      <Button
-        size="small"
-        variant="text"
-        startIcon={<FolderOpenOutlinedIcon fontSize="small" />}
-        onClick={() => folderInputRef.current?.click()}
-        sx={{ alignSelf: 'flex-start' }}
-      >
-        Choose a whole folder
-      </Button>
       <input
         ref={folderInputRef}
         type="file"
@@ -151,8 +172,7 @@ export function PhotoDropzone() {
         // @ts-expect-error -- non-standard but supported in Chrome and Safari
         webkitdirectory=""
         onChange={(e) => {
-          if (e.target.files) handleFiles(e.target.files);
-          e.target.value = '';
+          handleInputFiles(e.target);
         }}
       />
 
@@ -160,57 +180,60 @@ export function PhotoDropzone() {
         <Box>
           <LinearProgress
             variant="determinate"
-            value={analyzeProgress.total ? (analyzeProgress.done / analyzeProgress.total) * 100 : 0}
-            sx={{ borderRadius: 1, height: 6 }}
+            value={progress.total ? (progress.done / progress.total) * 100 : 0}
+            sx={{ borderRadius: 1, height: 5 }}
           />
           <Typography variant="caption" color="text.secondary">
-            Analysing {analyzeProgress.done} / {analyzeProgress.total}
+            Analysing {progress.done.toLocaleString()} / {progress.total.toLocaleString()}
           </Typography>
         </Box>
       )}
 
-      {tiles.length > 0 && !analyzing && <ThumbnailStrip files={tileFiles} />}
+      {tileCount > 0 && !analyzing && <ThumbnailStrip />}
 
-      {(tiles.length > 0 || skippedFiles.length > 0) && !analyzing && (
-        <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-          <Chip size="small" label={`${tiles.length} loaded`} color="primary" variant="outlined" />
-          {cacheHits > 0 && <Chip size="small" label={`${cacheHits} from cache`} variant="outlined" />}
+      {hasPhotos && !analyzing && (
+        <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+          <Chip size="small" label={`${tileCount.toLocaleString()} loaded`} color="primary" variant="outlined" />
+          {cacheHits > 0 && <Chip size="small" label={`${cacheHits.toLocaleString()} from cache`} variant="outlined" />}
           {skippedFiles.length > 0 && (
-            <Chip size="small" label={`${skippedFiles.length} skipped`} color="warning" variant="outlined" />
+            <Chip
+              size="small"
+              label={`${skippedFiles.length} skipped`}
+              color="warning"
+              variant="outlined"
+              onClick={() => setShowSkipped((v) => !v)}
+              aria-expanded={showSkipped}
+            />
           )}
-          <Button size="small" onClick={() => clearPhotos()} sx={{ ml: 'auto' }}>
-            Clear
-          </Button>
         </Stack>
       )}
 
-      {skippedFiles.length > 0 && !analyzing && (
-        <Alert severity="warning" variant="outlined" sx={{ borderRadius: 2 }}>
-          <AlertTitle>Some files were skipped</AlertTitle>
-          {skippedFiles.slice(0, 5).map((f) => (
-            <Typography key={f.name} variant="caption" display="block">
-              {f.name}: {f.reason}
+      <Collapse in={showSkipped && skippedFiles.length > 0 && !analyzing} unmountOnExit>
+        <Alert severity="warning" variant="outlined" sx={{ borderRadius: 1.5, maxHeight: 160, overflowY: 'auto' }}>
+          {skippedFiles.map((f, i) => (
+            <Typography key={`${f.name}-${i}`} variant="caption" display="block">
+              <strong>{f.name}</strong>: {f.reason}
             </Typography>
           ))}
-          {skippedFiles.length > 5 && (
-            <Typography variant="caption" display="block">
-              and {skippedFiles.length - 5} more
-            </Typography>
-          )}
         </Alert>
-      )}
+      </Collapse>
 
-      <Tooltip title="Forget cached thumbnails/features for all photos, so the next analysis re-decodes everything">
-        <Button
-          size="small"
-          color="inherit"
-          startIcon={<DeleteSweepOutlinedIcon fontSize="small" />}
-          onClick={handleClearCache}
-          sx={{ alignSelf: 'flex-start', color: 'text.secondary' }}
-        >
-          Clear cache
+      <Stack direction="row" spacing={0.5} alignItems="center">
+        <Button size="small" startIcon={<FolderOpenOutlinedIcon fontSize="small" />} onClick={() => folderInputRef.current?.click()}>
+          Choose folder
         </Button>
-      </Tooltip>
+        <Box sx={{ flex: 1 }} />
+        {hasPhotos && (
+          <Button size="small" color="inherit" sx={{ color: 'text.secondary' }} onClick={clearAllPhotos}>
+            Clear
+          </Button>
+        )}
+        <Tooltip title="Forget stored thumbnails and analysis for all photos, so the next load re-reads everything">
+          <Button size="small" color="inherit" sx={{ color: 'text.secondary' }} onClick={handleClearCache}>
+            Clear cache
+          </Button>
+        </Tooltip>
+      </Stack>
     </Stack>
   );
 }

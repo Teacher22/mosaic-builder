@@ -1,6 +1,8 @@
 # Mosaic Builder
 
-Local-only photo mosaic app. Pick a folder of photos and a target image, click Generate, and get a high-resolution mosaic that looks like the target up close and far away. No server, no uploads, no accounts — see [project.md](project.md) for the full spec.
+Rebuild any image from your own photos. Pick a folder of photos and a target image, click Generate, and get a high-resolution mosaic you can zoom right into. No server, no uploads, no accounts: everything runs in your browser. See [project.md](project.md) for the original spec.
+
+**Try it:** https://teacher22.github.io/mosaic-builder/
 
 ## Quick start
 
@@ -39,16 +41,35 @@ BASE_PATH=/mosaic-builder/ npm run build
 BASE_PATH=/mosaic-builder/ npm run preview
 ```
 
+## Features
+
+- **Tone-preserving colour correction:** each tile's tones shift toward the target region by region, keeping the photo's own detail.
+- **Adaptive detail:** smaller tiles where the target has edges, larger ones on flat areas.
+- **Tile inspector:** hover a tile to see its source photo and every other place it's used.
+- **Likeness score:** measured structural similarity to the target, updated as you change settings.
+- **Before/after divider, squint test, reuse heatmap, animated replay and reshuffle.**
+- **Export:** PNG or JPEG up to 16,000 px on a side, a print-size calculator, and a CSV listing which photo goes where.
+- **Grout lines** for a real tile-mosaic look.
+- **Works offline** after a first use, and installs as an app in supporting browsers.
+
+Keyboard: `G` generate, `E` export, `C` compare, `I` inspect, `H` heatmap, `S` squint, `R` replay, `+`/`-` zoom, `0` fit, `1` actual pixels.
+
 ## Status
 
-Work in progress. Tested only in Chromium, and with up to 583 small photos.
+Measured on an Apple M6 Mac in Chromium, using 2,000 12 MP JPEGs (300 distinct images, repeated):
 
-**Working:** photo analysis in background workers, matching with repeat control, IndexedDB analysis cache, folder picker, PNG/JPEG export up to 8000px, draggable before/after compare, zoom and pan, live low-res preview.
+| Task | Time | Target |
+|---|---|---|
+| First analysis of 2,000 photos | 12.4 s | UI stays responsive |
+| Reload and re-select the same 2,000 | 0.27 s | under 3 s |
+| 3,072 tiles at 8000 px, PNG | 3.8 s | about 15 s |
+| Live preview at 972 tiles | 0.84 s | about 1 s |
 
-**Known gaps:**
+Also run through the same flow in Playwright's WebKit build (Safari's engine), and HEIC decoding was tested both natively and through the `heic2any` fallback.
 
-- Likeness to the target is still weak with small photo libraries; a better tone transfer is written and tested (`src/core/toneTransfer.ts`) but not connected yet.
-- Rendering decodes full-size originals, so large libraries will be slow.
-- Cancel may not stop running work.
-- Untested: 2000+ photos, HEIC, Safari.
-- Several UI items from [project.md](project.md) section 6a aren't built, including the reuse heatmap, ETA and animated replay.
+**Known limits:**
+
+- Not yet tested in Safari itself, or on real iPhone HEIC files (the test files were made with macOS `sips`).
+- Likeness depends on your photos: with only a few, tiles repeat visibly. The app warns when there are too few.
+- Tile cells are square; the spec's rectangular cells aren't built.
+- Workers are only stored for offline use once they've run, so generate one mosaic before relying on it offline.

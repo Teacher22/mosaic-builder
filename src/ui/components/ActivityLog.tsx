@@ -1,55 +1,47 @@
-import { useState } from 'react';
-import {
-  Accordion,
-  AccordionDetails,
-  AccordionSummary,
-  Box,
-  Button,
-  Stack,
-  Typography,
-} from '@mui/material';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import { useEffect, useRef } from 'react';
+import { Box, Button, Paper, Stack, Typography } from '@mui/material';
 import { useMosaicStore } from '../hooks/useMosaicStore';
 
 const COLORS: Record<string, string> = { info: 'text.secondary', warn: 'warning.main', error: 'error.main' };
 
 export function ActivityLog() {
   const log = useMosaicStore((s) => s.log);
-  const [open, setOpen] = useState(false);
+  const setToast = useMosaicStore((s) => s.setToast);
+  const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [log.length]);
 
   const copy = () => {
-    const text = log
-      .map((l) => `${new Date(l.ts).toLocaleTimeString()} [${l.level}] ${l.message}`)
-      .join('\n');
-    navigator.clipboard.writeText(text).catch(() => {});
+    const text = log.map((l) => `${new Date(l.ts).toLocaleTimeString()} [${l.level}] ${l.message}`).join('\n');
+    navigator.clipboard.writeText(text).then(
+      () => setToast({ severity: 'success', message: 'Log copied.' }),
+      () => setToast({ severity: 'error', message: "Couldn't copy the log." }),
+    );
   };
 
-  if (log.length === 0) return null;
-
   return (
-    <Accordion
-      expanded={open}
-      onChange={(_, isOpen) => setOpen(isOpen)}
-      variant="outlined"
-      sx={{ borderRadius: 3, '&::before': { display: 'none' } }}
-    >
-      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
-        <Typography variant="body2">Activity log ({log.length})</Typography>
-      </AccordionSummary>
-      <AccordionDetails>
-        <Stack direction="row" justifyContent="flex-end" sx={{ mb: 1 }}>
-          <Button size="small" onClick={copy}>
-            Copy log
-          </Button>
-        </Stack>
-        <Box sx={{ maxHeight: 200, overflowY: 'auto', fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
-          {log.map((entry, i) => (
-            <Typography key={i} component="div" variant="caption" sx={{ color: COLORS[entry.level], display: 'block' }}>
-              {new Date(entry.ts).toLocaleTimeString()} {entry.message}
-            </Typography>
-          ))}
-        </Box>
-      </AccordionDetails>
-    </Accordion>
+    <Paper variant="outlined" sx={{ p: 1.25, borderRadius: 2 }}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.5 }}>
+        <Typography variant="subtitle2">Activity log</Typography>
+        <Button size="small" onClick={copy} disabled={log.length === 0}>
+          Copy log
+        </Button>
+      </Stack>
+      <Box sx={{ maxHeight: 150, overflowY: 'auto', fontFamily: 'ui-monospace, Menlo, monospace', fontSize: 12 }}>
+        {log.length === 0 && (
+          <Typography variant="caption" color="text.secondary">
+            Nothing yet.
+          </Typography>
+        )}
+        {log.map((entry, i) => (
+          <Box key={i} sx={{ color: COLORS[entry.level] }}>
+            {new Date(entry.ts).toLocaleTimeString()} {entry.message}
+          </Box>
+        ))}
+        <div ref={endRef} />
+      </Box>
+    </Paper>
   );
 }

@@ -1,262 +1,423 @@
-import { useCallback, useRef } from 'react';
 import { useMosaicStore } from './useMosaicStore';
+import { cacheKey } from '../../store/cache';
 import type {
+  AnalyzeItem,
   AnalyzeRequest,
   AnalyzeResponse,
   ExportFormat,
   ExportRequest,
   RenderRequest,
+  RenderWorkerEvent,
   Stage,
-  WorkerEvent,
+  TileRecord,
 } from '../../types';
 
 const POOL_SIZE = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+const STORE_FLUSH_MS = 120;
+const LIVE_PREVIEW_WIDTH = 1000;
 
-export function useWorkers() {
-  const analyzeWorkersRef = useRef<Worker[]>([]);
-  const renderWorkerRef = useRef<Worker | null>(null);
-  const exportWorkerRef = useRef<Worker | null>(null);
+// Workers live at module level, not per component, so any component's Cancel
+// reaches the work another component started.
+let analyzeWorkers: Worker[] = [];
+let analyzeFlushTimer: ReturnType<typeof setInterval> | null = null;
+let nextTileId = 0;
+let renderWorker: Worker | null = null;
+let exportWorker: Worker | null = null;
+let currentRunId = 0;
+let currentExportRunId = 0;
 
-  const cancelAnalyze = useCallback(() => {
-    analyzeWorkersRef.current.forEach((w) => w.terminate());
-    analyzeWorkersRef.current = [];
-    useMosaicStore.getState().setAnalyzing(false);
-  }, []);
+function spawnAnalyzeWorker(): Worker {
+  return new Worker(new URL('../../worker/analyze.worker.ts', import.meta.url), { type: 'module' });
+}
+function spawnRenderWorker(): Worker {
+  return new Worker(new URL('../../worker/render.worker.ts', import.meta.url), { type: 'module' });
+}
 
-  const cancelRender = useCallback(() => {
-    renderWorkerRef.current?.terminate();
-    renderWorkerRef.current = null;
-    useMosaicStore.getState().setRendering(false);
-    useMosaicStore.getState().setStage('idle');
-  }, []);
+function isHeic(file: File): boolean {
+  return /\.(heic|heif)$/i.test(file.name) || file.type === 'image/heic' || file.type === 'image/heif';
+}
 
-  const cancelExport = useCallback(() => {
-    exportWorkerRef.current?.terminate();
-    exportWorkerRef.current = null;
-    useMosaicStore.getState().setExporting(false);
-  }, []);
+function targetKey(file: File): string {
+  return cacheKey(file.name, file.size, file.lastModified);
+}
 
-  const analyzePhotos = useCallback(
-    (files: File[]) => {
-      cancelAnalyze();
-      const store = useMosaicStore.getState();
-      store.clearPhotos();
-      if (files.length === 0) return;
+function stopAnalyze(): void {
+  analyzeWorkers.forEach((w) => w.terminate());
+  analyzeWorkers = [];
+  if (analyzeFlushTimer) clearInterval(analyzeFlushTimer);
+  analyzeFlushTimer = null;
+}
 
-      store.setAnalyzing(true);
-      store.setAnalyzeProgress(0, files.length);
-      store.addLog('info', `Analysing ${files.length} photo(s)...`);
+function cancelAnalyze(): void {
+  stopAnalyze();
+  const s = useMosaicStore.getState();
+  if (!s.analyzing) return;
+  s.setAnalyzing(false);
+  s.addLog('info', `Stopped analysing. Kept ${s.tiles.length} photo(s) finished so far.`);
+}
 
-      const startedAt = performance.now();
-      const poolSize = Math.min(POOL_SIZE, files.length);
-      const chunkSize = Math.ceil(files.length / poolSize);
-      let completed = 0;
-      let cacheHits = 0;
-      let workersDone = 0;
-      let activeWorkerCount = 0;
+function cancelRender(): void {
+  // Terminating is the only way to interrupt a decode that's mid-flight.
+  renderWorker?.terminate();
+  renderWorker = null;
+  currentRunId++;
+  const s = useMosaicStore.getState();
+  const wasRendering = s.rendering;
+  s.setRendering(false);
+  s.setDrafting(false);
+  s.setPreviewBitmap(null);
+  s.setStage(s.resultBitmap ? 'done' : 'idle');
+  if (wasRendering) s.addLog('info', 'Render cancelled.');
+}
 
-      for (let w = 0; w < poolSize; w++) {
-        const startId = w * chunkSize;
-        const slice = files.slice(startId, startId + chunkSize);
-        if (slice.length === 0) continue;
-        activeWorkerCount++;
+function cancelExport(): void {
+  exportWorker?.terminate();
+  exportWorker = null;
+  currentExportRunId++;
+  const s = useMosaicStore.getState();
+  if (s.exporting) s.addLog('info', 'Export cancelled.');
+  s.setExporting(false);
+}
 
-        const worker = new Worker(new URL('../../worker/analyze.worker.ts', import.meta.url), { type: 'module' });
-        analyzeWorkersRef.current.push(worker);
+/** Lazily loads the HEIC decoder only when a browser that can't read HEIC meets one. */
+async function convertHeic(file: File): Promise<Blob> {
+  const heic2any = (await import('heic2any')).default;
+  const converted = await heic2any({ blob: file, toType: 'image/jpeg', quality: 0.9 });
+  return Array.isArray(converted) ? converted[0] : converted;
+}
 
-        worker.onmessage = (ev: MessageEvent<AnalyzeResponse>) => {
-          const msg = ev.data;
-          const s = useMosaicStore.getState();
-          if (msg.type === 'result') {
-            completed++;
-            if (msg.fromCache) cacheHits++;
-            s.setTiles((tiles) => [
-              ...tiles,
-              { id: msg.id, name: msg.name, features: Float32Array.from(msg.features), file: files[msg.id] },
-            ]);
-            s.setAnalyzeProgress(completed, files.length);
-          } else if (msg.type === 'skipped') {
-            completed++;
-            s.addSkipped({ name: msg.name, reason: msg.reason });
-            s.addLog('warn', `Skipped ${msg.name}: ${msg.reason}`);
-            s.setAnalyzeProgress(completed, files.length);
-          } else if (msg.type === 'done') {
-            worker.terminate();
-            analyzeWorkersRef.current = analyzeWorkersRef.current.filter((x) => x !== worker);
-            workersDone++;
-            if (workersDone === activeWorkerCount) {
-              const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
-              const store2 = useMosaicStore.getState();
-              store2.setAnalyzing(false);
-              store2.incCacheHits(cacheHits);
-              const cacheNote = cacheHits > 0 ? `, ${cacheHits} from cache` : '';
-              store2.addLog('info', `Analysed ${completed} photo(s) (${elapsed}s${cacheNote})`);
-            }
-          }
-        };
+/** Target images go straight to an <img>, so HEIC must be converted first where it isn't natively readable. */
+async function setTargetFile(file: File): Promise<void> {
+  const s = useMosaicStore.getState();
+  if (!isHeic(file)) {
+    s.setTarget(file);
+    return;
+  }
+  try {
+    await createImageBitmap(file).then((b) => b.close());
+    s.setTarget(file);
+  } catch {
+    try {
+      s.addLog('info', `Converting ${file.name}...`);
+      const jpeg = await convertHeic(file);
+      s.setTarget(new File([jpeg], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg', lastModified: file.lastModified }));
+    } catch (err) {
+      const message = `Couldn't read ${file.name}: ${err instanceof Error ? err.message : String(err)}`;
+      s.addLog('error', message);
+      s.setToast({ severity: 'error', message });
+    }
+  }
+}
 
-        const request: AnalyzeRequest = { type: 'analyze', files: slice, startId };
-        worker.postMessage(request);
-      }
-    },
-    [cancelAnalyze],
-  );
+function analyzePhotos(incoming: File[], opts?: { thenGenerate?: boolean }): void {
+  stopAnalyze();
+  const store = useMosaicStore.getState();
 
-  const generate = useCallback(
-    (opts?: { outputWidthOverride?: number; quiet?: boolean }) => {
-      const s = useMosaicStore.getState();
-      if (!s.target || s.tiles.length === 0 || s.rendering) return;
+  const known = new Set(store.tiles.map((t) => t.key));
+  const fileById = new Map<number, { file: File; key: string }>();
+  const items: AnalyzeItem[] = [];
+  let duplicates = 0;
+  for (const file of incoming) {
+    const key = cacheKey(file.name, file.size, file.lastModified);
+    if (known.has(key)) {
+      duplicates++;
+      continue;
+    }
+    known.add(key);
+    const id = nextTileId++;
+    fileById.set(id, { file, key });
+    items.push({ id, key, name: file.name, blob: file, isHeic: isHeic(file) });
+  }
+  if (duplicates > 0) store.addLog('info', `Skipped ${duplicates} photo(s) already loaded.`);
+  if (items.length === 0) return;
 
-      cancelRender();
-      s.setRendering(true);
-      s.setError(null);
-      s.resetStageDurations();
-      if (s.resultBitmap) s.resultBitmap.close();
-      if (s.previewBitmap) s.previewBitmap.close();
-      s.setPreviewBitmap(null);
-      s.setResult(null, null);
+  store.startAnalyze(items.length);
+  store.addLog('info', `Analysing ${items.length} photo(s)...`);
 
-      const worker = new Worker(new URL('../../worker/render.worker.ts', import.meta.url), { type: 'module' });
-      renderWorkerRef.current = worker;
+  const startedAt = performance.now();
+  const poolSize = Math.min(POOL_SIZE, items.length);
+  const chunkSize = Math.ceil(items.length / poolSize);
+  let completed = 0;
+  let cacheHits = 0;
+  let converting = 0;
+  let workersDone = 0;
+  let pendingTiles: TileRecord[] = [];
+  let cacheWarned = false;
 
-      const stageStartTimes: Partial<Record<Stage, number>> = {};
-      let prevStage: Stage | null = null;
-      const startedAt = performance.now();
-
-      worker.onmessage = (ev: MessageEvent<WorkerEvent>) => {
-        const msg = ev.data;
-        const store = useMosaicStore.getState();
-        switch (msg.type) {
-          case 'stage': {
-            const now = performance.now();
-            if (prevStage) store.setStageDuration(prevStage, now - stageStartTimes[prevStage]!);
-            stageStartTimes[msg.stage] = now;
-            prevStage = msg.stage;
-            store.setStage(msg.stage);
-            if (!opts?.quiet) store.addLog('info', `Stage: ${msg.stage}`);
-            break;
-          }
-          case 'progress':
-            store.setRenderProgress(msg.done, msg.total);
-            break;
-          case 'tiles-batch':
-            break;
-          case 'preview': {
-            const prev = useMosaicStore.getState().previewBitmap;
-            if (prev) prev.close();
-            store.setPreviewBitmap(msg.bitmap);
-            break;
-          }
-          case 'log':
-            store.addLog(msg.level, msg.message);
-            break;
-          case 'done': {
-            const now = performance.now();
-            if (prevStage) store.setStageDuration(prevStage, now - stageStartTimes[prevStage]!);
-            const prevPreview = useMosaicStore.getState().previewBitmap;
-            if (prevPreview) {
-              prevPreview.close();
-              store.setPreviewBitmap(null);
-            }
-            store.setStage('done');
-            store.setResult(msg.bitmap, { ...msg.stats, totalTimeMs: now - startedAt });
-            store.setRendering(false);
-            if (!opts?.quiet) {
-              store.clearSettingsDirty();
-              store.addLog('info', `Mosaic generated (${((now - startedAt) / 1000).toFixed(1)}s)`);
-            }
-            renderWorkerRef.current = null;
-            worker.terminate();
-            break;
-          }
-          case 'error':
-            store.setError(msg.message);
-            store.addLog('error', msg.message);
-            store.setRendering(false);
-            renderWorkerRef.current = null;
-            worker.terminate();
-            break;
-        }
-      };
-
-      const settings = opts?.outputWidthOverride
-        ? { ...s.settings, outputWidth: opts.outputWidthOverride }
-        : s.settings;
-
-      const request: RenderRequest = {
-        type: 'render',
-        targetFile: s.target,
-        settings,
-        tiles: s.tiles.map((t) => ({ id: t.id, name: t.name, features: Array.from(t.features), file: t.file })),
-      };
-      worker.postMessage(request);
-    },
-    [cancelRender],
-  );
-
-  const exportMosaic = useCallback((opts: { width: number; format: ExportFormat; quality: number }) => {
+  // Results are applied to the store in groups: thousands of separate updates
+  // would each re-render the UI and copy the growing list.
+  const flush = () => {
     const s = useMosaicStore.getState();
-    if (!s.target || s.tiles.length === 0 || s.exporting) return;
+    if (pendingTiles.length > 0) {
+      s.addTiles(pendingTiles);
+      pendingTiles = [];
+    }
+    s.setAnalyzeProgress(completed, items.length);
+  };
+  analyzeFlushTimer = setInterval(flush, STORE_FLUSH_MS);
 
-    cancelExport();
-    s.setExporting(true);
-    s.setExportProgress(0, 0);
-    s.setError(null);
+  const finishIfDone = () => {
+    if (workersDone < analyzeWorkers.length || converting > 0) return;
+    stopAnalyze();
+    flush();
+    const s = useMosaicStore.getState();
+    s.setAnalyzing(false);
+    s.incCacheHits(cacheHits);
+    const elapsed = performance.now() - startedAt;
+    s.setStageDuration('analyse', elapsed);
+    const cacheNote = cacheHits > 0 ? `, ${cacheHits} from cache` : '';
+    s.addLog('info', `Analysed ${completed} photo(s) (${(elapsed / 1000).toFixed(1)}s${cacheNote})`);
+    if (opts?.thenGenerate) generate();
+  };
 
-    const worker = new Worker(new URL('../../worker/render.worker.ts', import.meta.url), { type: 'module' });
-    exportWorkerRef.current = worker;
-    const startedAt = performance.now();
+  const convertAndResubmit = async (id: number, worker: Worker) => {
+    const entry = fileById.get(id)!;
+    converting++;
+    try {
+      const blob = await convertHeic(entry.file);
+      const request: AnalyzeRequest = {
+        type: 'analyze',
+        skipCache: true,
+        items: [{ id, key: entry.key, name: entry.file.name, blob, isHeic: true }],
+      };
+      if (!analyzeWorkers.includes(worker)) return;
+      workersDone--; // this worker has one more 'done' to report
+      worker.postMessage(request);
+    } catch (err) {
+      completed++;
+      const reason = err instanceof Error ? err.message : String(err);
+      const s = useMosaicStore.getState();
+      s.addSkipped([{ name: entry.file.name, reason }]);
+      s.addLog('warn', `Skipped ${entry.file.name}: ${reason}`);
+    } finally {
+      converting--;
+      finishIfDone();
+    }
+  };
 
-    worker.onmessage = (ev: MessageEvent<WorkerEvent>) => {
+  for (let w = 0; w < poolSize; w++) {
+    const slice = items.slice(w * chunkSize, (w + 1) * chunkSize);
+    if (slice.length === 0) continue;
+    const worker = spawnAnalyzeWorker();
+    analyzeWorkers.push(worker);
+
+    worker.onmessage = (ev: MessageEvent<AnalyzeResponse>) => {
       const msg = ev.data;
-      const store = useMosaicStore.getState();
-      switch (msg.type) {
-        case 'export-progress':
-          store.setExportProgress(msg.done, msg.total);
-          break;
-        case 'log':
-          store.addLog(msg.level, msg.message);
-          break;
-        case 'export-done': {
-          const url = URL.createObjectURL(msg.blob);
-          store.setExportResult({
-            url,
-            format: msg.stats.format,
-            width: msg.stats.width,
-            height: msg.stats.height,
-            bytes: msg.stats.bytes,
-          });
-          store.setExporting(false);
-          const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
-          store.addLog(
-            'info',
-            `Exported ${msg.stats.width}×${msg.stats.height} ${msg.stats.format.toUpperCase()} (${seconds}s)`,
-          );
-          exportWorkerRef.current = null;
-          worker.terminate();
+      if (msg.type === 'done') {
+        workersDone++;
+        finishIfDone();
+        return;
+      }
+      const s = useMosaicStore.getState();
+      if (msg.type === 'cache-unavailable') {
+        if (!cacheWarned) s.addLog('warn', `Couldn't save the analysis cache (${msg.reason}). Everything still works, but photos will be re-read next time.`);
+        cacheWarned = true;
+        return;
+      }
+      for (const r of msg.results) {
+        const entry = fileById.get(r.id)!;
+        completed++;
+        if (r.fromCache) cacheHits++;
+        pendingTiles.push({ id: r.id, key: entry.key, name: entry.file.name, features: r.features, file: entry.file, thumb: r.thumb });
+      }
+      if (msg.skipped.length > 0) {
+        completed += msg.skipped.length;
+        s.addSkipped(msg.skipped);
+        for (const f of msg.skipped) s.addLog('warn', `Skipped ${f.name}: ${f.reason}`);
+      }
+      for (const id of msg.needsConversion) convertAndResubmit(id, worker);
+    };
+    worker.onerror = (ev) => {
+      const s = useMosaicStore.getState();
+      s.addLog('error', `Analysis worker failed: ${ev.message}`);
+      s.setToast({ severity: 'error', message: `Analysis failed: ${ev.message}` });
+      workersDone++;
+      finishIfDone();
+    };
+
+    const request: AnalyzeRequest = { type: 'analyze', items: slice };
+    worker.postMessage(request);
+  }
+}
+
+function clearAllPhotos(): void {
+  stopAnalyze();
+  const s = useMosaicStore.getState();
+  s.setAnalyzing(false);
+  s.clearPhotos();
+}
+
+function generate(opts?: { draft?: boolean }): void {
+  const s = useMosaicStore.getState();
+  if (!s.target || s.tiles.length === 0 || s.analyzing) return;
+  const draft = !!opts?.draft;
+  // A draft never interrupts a full render; a full render replaces any draft.
+  if (draft && s.rendering) return;
+
+  const runId = ++currentRunId;
+  if (!renderWorker) renderWorker = spawnRenderWorker();
+  const worker = renderWorker;
+
+  if (draft) {
+    s.setDrafting(true);
+  } else {
+    s.setDrafting(false);
+    s.beginRender();
+    s.setPreviewBitmap(null);
+    s.setStage('match');
+    s.addLog('info', `Generating ${s.settings.tilesAcross} tiles across at ${s.settings.outputWidth}px...`);
+  }
+
+  const startedAt = performance.now();
+  let stageStart = startedAt;
+  let prevStage: Stage | null = null;
+
+  worker.onmessage = (ev: MessageEvent<RenderWorkerEvent>) => {
+    const msg = ev.data;
+    if (msg.runId !== currentRunId) {
+      if (msg.type === 'preview' || msg.type === 'done') msg.bitmap.close();
+      return;
+    }
+    const store = useMosaicStore.getState();
+    switch (msg.type) {
+      case 'stage': {
+        if (draft) break;
+        const now = performance.now();
+        if (prevStage) store.setStageDuration(prevStage, now - stageStart);
+        stageStart = now;
+        prevStage = msg.stage;
+        store.setStage(msg.stage);
+        break;
+      }
+      case 'progress':
+        if (!draft) store.setRenderProgress(msg.done, msg.total);
+        break;
+      case 'preview':
+        store.setPreviewBitmap(msg.bitmap);
+        break;
+      case 'log':
+        store.addLog(msg.level, msg.message);
+        break;
+      case 'done': {
+        const now = performance.now();
+        if (draft) {
+          store.setResult(msg.bitmap, { ...msg.stats, totalTimeMs: now - startedAt }, msg.map, true);
+          store.setDrafting(false);
           break;
         }
-        case 'export-error':
-          store.setError(msg.message);
-          store.addLog('error', msg.message);
-          store.setExporting(false);
-          exportWorkerRef.current = null;
-          worker.terminate();
-          break;
+        if (prevStage) store.setStageDuration(prevStage, now - stageStart);
+        store.setResult(msg.bitmap, { ...msg.stats, totalTimeMs: now - startedAt }, msg.map, false);
+        store.setPreviewBitmap(null);
+        store.setStage('done');
+        store.setRendering(false);
+        store.clearSettingsDirty();
+        store.addLog('info', `Mosaic generated (${((now - startedAt) / 1000).toFixed(1)}s, likeness ${Math.round(msg.stats.likeness * 100)}%)`);
+        break;
       }
-    };
+      case 'error':
+        store.setToast({ severity: 'error', message: msg.message });
+        store.addLog('error', msg.message);
+        store.setRendering(false);
+        store.setDrafting(false);
+        if (!draft) store.setStage('failed');
+        break;
+    }
+  };
 
-    const request: ExportRequest = {
-      type: 'export',
-      targetFile: s.target,
-      settings: s.settings,
-      tiles: s.tiles.map((t) => ({ id: t.id, name: t.name, features: Array.from(t.features), file: t.file })),
-      exportWidth: opts.width,
-      format: opts.format,
-      quality: opts.quality,
-    };
-    worker.postMessage(request);
-  }, [cancelExport]);
+  worker.onerror = (ev) => {
+    const store = useMosaicStore.getState();
+    store.setToast({ severity: 'error', message: `Render failed: ${ev.message}` });
+    store.addLog('error', `Render worker failed: ${ev.message}`);
+    store.setRendering(false);
+    store.setDrafting(false);
+    store.setStage('failed');
+    renderWorker?.terminate();
+    renderWorker = null;
+  };
 
-  return { analyzePhotos, generate, exportMosaic, cancelAnalyze, cancelRender, cancelExport };
+  const settings = draft
+    ? { ...s.settings, outputWidth: Math.min(LIVE_PREVIEW_WIDTH, s.settings.outputWidth) }
+    : s.settings;
+  const request: RenderRequest = {
+    type: 'render',
+    runId,
+    targetFile: s.target,
+    targetKey: targetKey(s.target),
+    settings,
+    tiles: s.tiles,
+    draft,
+  };
+  worker.postMessage(request);
+}
+
+function exportMosaic(opts: { width: number; format: ExportFormat; quality: number }): void {
+  const s = useMosaicStore.getState();
+  if (!s.target || s.tiles.length === 0 || s.exporting) return;
+
+  s.setExporting(true);
+  s.setExportProgress(0, 0);
+  s.setExportResult(null);
+
+  const runId = ++currentExportRunId;
+  if (!exportWorker) exportWorker = spawnRenderWorker();
+  const worker = exportWorker;
+  const startedAt = performance.now();
+
+  worker.onmessage = (ev: MessageEvent<RenderWorkerEvent>) => {
+    const msg = ev.data;
+    if (msg.runId !== currentExportRunId) return;
+    const store = useMosaicStore.getState();
+    switch (msg.type) {
+      case 'export-progress':
+        store.setExportProgress(msg.done, msg.total);
+        break;
+      case 'log':
+        store.addLog(msg.level, msg.message);
+        break;
+      case 'export-done': {
+        store.setExportResult({
+          url: URL.createObjectURL(msg.blob),
+          format: msg.stats.format,
+          width: msg.stats.width,
+          height: msg.stats.height,
+          bytes: msg.stats.bytes,
+        });
+        store.setExporting(false);
+        const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+        store.addLog('info', `Exported ${msg.stats.width}×${msg.stats.height} ${msg.stats.format.toUpperCase()} (${seconds}s)`);
+        store.setToast({ severity: 'success', message: `Export ready in ${seconds}s` });
+        // Originals decoded for a big export shouldn't stay in memory.
+        exportWorker?.terminate();
+        exportWorker = null;
+        break;
+      }
+      case 'export-error':
+        store.setToast({ severity: 'error', message: msg.message });
+        store.addLog('error', msg.message);
+        store.setExporting(false);
+        exportWorker?.terminate();
+        exportWorker = null;
+        break;
+    }
+  };
+
+  const request: ExportRequest = {
+    type: 'export',
+    runId,
+    targetFile: s.target,
+    targetKey: targetKey(s.target),
+    settings: s.settings,
+    tiles: s.tiles,
+    exportWidth: opts.width,
+    format: opts.format,
+    quality: opts.quality,
+  };
+  worker.postMessage(request);
+}
+
+const actions = { analyzePhotos, setTargetFile, clearAllPhotos, generate, exportMosaic, cancelAnalyze, cancelRender, cancelExport };
+
+/** Stable actions, shared by every component. */
+export function useWorkers() {
+  return actions;
 }

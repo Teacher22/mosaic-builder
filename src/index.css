@@ -19,3 +19,11 @@ body,
     transition-duration: 0.001ms !important;
   }
 }
+
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  src: url('./ui/fonts/inter-latin-wght.woff2') format('woff2');
+}

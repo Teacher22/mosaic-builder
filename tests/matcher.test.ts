@@ -137,3 +137,29 @@ describe('matchGrid', () => {
     expect(performance.now() - started).toBeLessThan(2000);
   });
 });
+
+describe('matchGrid with an adaptive layout', () => {
+  it('never repeats a tile within the radius when base cells hold several tiles', () => {
+    const rng = mulberry32(31);
+    const tiles: KDPoint[] = Array.from({ length: 400 }, (_, id) => ({
+      id,
+      features: Float32Array.from({ length: 27 }, () => rng()),
+    }));
+    const cols = 6;
+    const rows = 6;
+    // Every base cell holds two tiles.
+    const baseCellOf = Array.from({ length: cols * rows * 2 }, (_, i) => Math.floor(i / 2));
+    const cells = baseCellOf.map(() => Float32Array.from({ length: 27 }, () => 0.5));
+    const R = 2;
+    const assignment = matchGrid(cols, rows, cells, new KDTree(tiles), tiles.length, { reuseRadius: R, usagePenalty: 0.5, seed: 4 }, baseCellOf);
+    expect(assignment.every((id) => id >= 0)).toBe(true);
+    for (let a = 0; a < assignment.length; a++) {
+      for (let b = a + 1; b < assignment.length; b++) {
+        if (assignment[a] !== assignment[b]) continue;
+        const dx = Math.abs((baseCellOf[a] % cols) - (baseCellOf[b] % cols));
+        const dy = Math.abs(Math.floor(baseCellOf[a] / cols) - Math.floor(baseCellOf[b] / cols));
+        expect(Math.max(dx, dy)).toBeGreaterThan(R);
+      }
+    }
+  });
+});

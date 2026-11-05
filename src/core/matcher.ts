@@ -27,9 +27,9 @@ export interface MatchSettings {
  * tile if its neighbourhood is smaller than the library; we also leave half
  * the library free so the choice isn't forced to terrible matches.
  */
-export function effectiveReuseRadius(requested: number, tileCount: number): number {
+export function effectiveReuseRadius(requested: number, tileCount: number, cellsPerBase = 1): number {
   let r = Math.max(0, Math.floor(requested));
-  while (r > 0 && (2 * r + 1) * (2 * r + 1) - 1 >= tileCount / 2) r--;
+  while (r > 0 && (2 * r + 1) * (2 * r + 1) * cellsPerBase - 1 >= tileCount / 2) r--;
   return r;
 }
 
@@ -40,7 +40,9 @@ export function effectiveReuseRadius(requested: number, tileCount: number): numb
  * cells early in the order blocked for cells late in the order.
  *
  * Score = distance + normalised usage penalty; no tile repeats within the
- * effective Chebyshev radius.
+ * effective Chebyshev radius, measured in base grid cells. `baseCellOf` maps
+ * each cell to its base grid cell for adaptive layouts, where a base cell can
+ * hold several smaller tiles. Without it there is one cell per base cell.
  */
 export function matchGrid(
   cols: number,
@@ -49,8 +51,9 @@ export function matchGrid(
   tree: KDTree,
   tileCount: number,
   settings: MatchSettings,
+  baseCellOf?: ArrayLike<number>,
 ): number[] {
-  const cellCount = cols * rows;
+  const cellCount = cellFeatures.length;
   const assignment = new Array<number>(cellCount).fill(-1);
   if (tileCount === 0) return assignment;
 
@@ -60,7 +63,12 @@ export function matchGrid(
     Array.from({ length: cellCount }, (_, i) => i),
     rng,
   );
-  const R = effectiveReuseRadius(settings.reuseRadius, tileCount);
+  const baseCount = cols * rows;
+  const R = effectiveReuseRadius(settings.reuseRadius, tileCount, cellCount / Math.max(1, baseCount));
+
+  // Cells per base grid cell, so neighbourhood checks work for any layout.
+  const cellsInBase: number[][] = Array.from({ length: baseCount }, () => []);
+  for (let i = 0; i < cellCount; i++) cellsInBase[baseCellOf ? baseCellOf[i] : i].push(i);
 
   // Typical best-match distance across a sample of cells: the unit of the penalty.
   let distanceScale = 0;
@@ -74,17 +82,20 @@ export function matchGrid(
 
   const isBlocked = (cell: number, tileId: number): boolean => {
     if (R <= 0) return false;
-    const row = Math.floor(cell / cols);
-    const col = cell % cols;
+    const base = baseCellOf ? baseCellOf[cell] : cell;
+    const row = Math.floor(base / cols);
+    const col = base % cols;
     for (let dr = -R; dr <= R; dr++) {
       const r2 = row + dr;
       if (r2 < 0 || r2 >= rows) continue;
       const rowBase = r2 * cols;
       for (let dc = -R; dc <= R; dc++) {
-        if (dr === 0 && dc === 0) continue;
         const c2 = col + dc;
         if (c2 < 0 || c2 >= cols) continue;
-        if (assignment[rowBase + c2] === tileId) return true;
+        const others = cellsInBase[rowBase + c2];
+        for (let i = 0; i < others.length; i++) {
+          if (others[i] !== cell && assignment[others[i]] === tileId) return true;
+        }
       }
     }
     return false;
