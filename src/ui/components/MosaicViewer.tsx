@@ -7,6 +7,7 @@ import ZoomInOutlinedIcon from '@mui/icons-material/ZoomInOutlined';
 import ZoomOutOutlinedIcon from '@mui/icons-material/ZoomOutOutlined';
 import CenterFocusWeakOutlinedIcon from '@mui/icons-material/CenterFocusWeakOutlined';
 import ReplayOutlinedIcon from '@mui/icons-material/ReplayOutlined';
+import CompareArrowsIcon from '@mui/icons-material/CompareArrows';
 import { useMosaicStore } from '../hooks/useMosaicStore';
 import { useWorkers } from '../hooks/useWorkers';
 
@@ -17,6 +18,7 @@ interface Transform {
 }
 
 const clampScale = (s: number) => Math.min(8, Math.max(0.2, s));
+const DIVIDER_HIT_WIDTH = 32;
 
 export function MosaicViewer({ onOpenExport }: { onOpenExport: () => void }) {
   const resultBitmap = useMosaicStore((s) => s.resultBitmap);
@@ -73,6 +75,37 @@ export function MosaicViewer({ onOpenExport }: { onOpenExport: () => void }) {
   const onPointerUp = () => {
     dragState.current = null;
     setIsDragging(false);
+  };
+
+  // getBoundingClientRect reports the zoomed and panned box, so the divider
+  // tracks the pointer exactly at any zoom level.
+  const moveDividerTo = (clientX: number) => {
+    const wrap = stageWrapRef.current;
+    if (!wrap) return;
+    const rect = wrap.getBoundingClientRect();
+    setComparePercent(Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100)));
+  };
+
+  const onDividerPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Without this the viewer behind would start panning the image too.
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const onDividerPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) moveDividerTo(e.clientX);
+  };
+  const onDividerKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 10 : 2;
+    const next: Record<string, (v: number) => number> = {
+      ArrowLeft: (v) => Math.max(0, v - step),
+      ArrowRight: (v) => Math.min(100, v + step),
+      Home: () => 0,
+      End: () => 100,
+    };
+    const update = next[e.key];
+    if (!update) return;
+    e.preventDefault();
+    setComparePercent(update);
   };
 
   const zoomBy = (factor: number) => setTransform((t) => ({ ...t, scale: clampScale(t.scale * factor) }));
@@ -171,17 +204,64 @@ export function MosaicViewer({ onOpenExport }: { onOpenExport: () => void }) {
             />
             {showCompare && (
               <Box
+                role="slider"
+                tabIndex={0}
+                aria-label="Compare mosaic and target"
+                aria-orientation="horizontal"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={Math.round(comparePercent)}
+                onPointerDown={onDividerPointerDown}
+                onPointerMove={onDividerPointerMove}
+                onKeyDown={onDividerKeyDown}
+                // Sizes are divided by the zoom so the handle stays the same
+                // size on screen however far the image is scaled.
                 sx={{
                   position: 'absolute',
                   top: 0,
                   bottom: 0,
                   left: `${comparePercent}%`,
-                  width: '2px',
-                  bgcolor: 'common.white',
-                  boxShadow: '0 0 0 1px rgba(0,0,0,0.3)',
-                  pointerEvents: 'none',
+                  width: `${DIVIDER_HIT_WIDTH / transform.scale}px`,
+                  ml: `${-DIVIDER_HIT_WIDTH / 2 / transform.scale}px`,
+                  cursor: 'ew-resize',
+                  touchAction: 'none',
+                  outline: 'none',
+                  '&:focus-visible .compare-knob': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: 2 },
                 }}
-              />
+              >
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    top: 0,
+                    bottom: 0,
+                    left: '50%',
+                    width: `${2 / transform.scale}px`,
+                    ml: `${-1 / transform.scale}px`,
+                    bgcolor: 'common.white',
+                    boxShadow: 2,
+                  }}
+                />
+                <Box
+                  className="compare-knob"
+                  sx={{
+                    position: 'absolute',
+                    top: '50%',
+                    left: '50%',
+                    width: 36,
+                    height: 36,
+                    borderRadius: '50%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    bgcolor: 'common.white',
+                    color: 'grey.800',
+                    boxShadow: 3,
+                    transform: `translate(-50%, -50%) scale(${1 / transform.scale})`,
+                  }}
+                >
+                  <CompareArrowsIcon fontSize="small" />
+                </Box>
+              </Box>
             )}
           </Box>
         ) : targetUrl ? (
@@ -244,7 +324,8 @@ export function MosaicViewer({ onOpenExport }: { onOpenExport: () => void }) {
       )}
 
       {showCompare && (
-        <Box sx={{ px: 3, pb: 1.5 }}>
+        // Right padding keeps the "Target" label clear of the download buttons.
+        <Box sx={{ pl: 3, pr: '260px', pb: 1.5 }}>
           <Stack direction="row" spacing={1.5} alignItems="center">
             <Typography variant="caption" color="text.secondary">
               Mosaic
