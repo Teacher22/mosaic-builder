@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { KDTree, type KDPoint } from '../src/core/kdtree';
-import { matchGrid } from '../src/core/matcher';
+import { assignmentError, effectiveReuseRadius, matchGrid } from '../src/core/matcher';
 import { mulberry32 } from '../src/core/rng';
 
 describe('matchGrid', () => {
@@ -73,5 +73,65 @@ describe('matchGrid', () => {
     const a = matchGrid(4, 4, cellFeatures, tree, tiles.length, settings);
     const b = matchGrid(4, 4, cellFeatures, tree, tiles.length, settings);
     expect(a).toEqual(b);
+  });
+
+  it('keeps the radius achievable for small libraries', () => {
+    expect(effectiveReuseRadius(4, 60)).toBe(2);
+    expect(effectiveReuseRadius(4, 2000)).toBe(4);
+    expect(effectiveReuseRadius(3, 5)).toBe(0);
+    expect(effectiveReuseRadius(0, 2000)).toBe(0);
+  });
+
+  // The regression that made mosaics look like confetti: a fixed penalty per
+  // use dwarfs squared OKLab distances, so selection ignored colour entirely.
+  it('default-strength penalty still prefers colour over evenly spreading usage', () => {
+    const rng = mulberry32(5);
+    const tileCount = 60;
+    const tiles: KDPoint[] = Array.from({ length: tileCount }, (_, id) => ({
+      id,
+      features: Float32Array.from({ length: 27 }, () => rng() * 0.8 - 0.4),
+    }));
+    const byId = new Map(tiles.map((t) => [t.id, t.features]));
+    const cols = 60;
+    const rows = 45;
+    // Pale, nearly uniform target: only a handful of tiles genuinely fit.
+    const cells = Array.from({ length: cols * rows }, () =>
+      Float32Array.from({ length: 27 }, () => 0.3 + rng() * 0.01),
+    );
+    const tree = new KDTree(tiles);
+    const unpenalised = matchGrid(cols, rows, cells, tree, tileCount, { reuseRadius: 2, usagePenalty: 0, seed: 1 });
+    const balanced = matchGrid(cols, rows, cells, tree, tileCount, { reuseRadius: 2, usagePenalty: 0.5, seed: 1 });
+    expect(assignmentError(balanced, cells, byId)).toBeLessThan(assignmentError(unpenalised, cells, byId) * 1.25);
+    // ...and a real penalty does spread usage over more photos than none at all.
+    expect(new Set(balanced).size).toBeGreaterThanOrEqual(new Set(unpenalised).size);
+  });
+
+  it('refinement passes never make the assignment worse on average', () => {
+    const rng = mulberry32(11);
+    const tileCount = 300;
+    const tiles: KDPoint[] = Array.from({ length: tileCount }, (_, id) => ({
+      id,
+      features: Float32Array.from({ length: 27 }, () => rng()),
+    }));
+    const byId = new Map(tiles.map((t) => [t.id, t.features]));
+    const cells = Array.from({ length: 900 }, () => Float32Array.from({ length: 27 }, () => rng()));
+    const tree = new KDTree(tiles);
+    const base = { reuseRadius: 4, usagePenalty: 0, seed: 2 };
+    const greedy = matchGrid(30, 30, cells, tree, tileCount, { ...base, refinePasses: 0 });
+    const refined = matchGrid(30, 30, cells, tree, tileCount, { ...base, refinePasses: 2 });
+    expect(assignmentError(refined, cells, byId)).toBeLessThanOrEqual(assignmentError(greedy, cells, byId));
+  });
+
+  it('matches 3000 cells against 2000 tiles in under 2s (M2 acceptance)', () => {
+    const rng = mulberry32(21);
+    const tiles: KDPoint[] = Array.from({ length: 2000 }, (_, id) => ({
+      id,
+      features: Float32Array.from({ length: 27 }, () => rng()),
+    }));
+    const cells = Array.from({ length: 3000 }, () => Float32Array.from({ length: 27 }, () => rng()));
+    const tree = new KDTree(tiles);
+    const started = performance.now();
+    matchGrid(60, 50, cells, tree, tiles.length, { reuseRadius: 4, usagePenalty: 0.5, seed: 1 });
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });

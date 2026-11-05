@@ -46,6 +46,27 @@ export function computeFeatures(
 
 export const FEATURE_LENGTH = DIVISIONS * DIVISIONS * 3;
 
+/**
+ * Re-weights a feature vector for matching. Squared distance splits exactly
+ * into "overall colour" + "pattern inside the cell", so scaling the mean by
+ * `meanWeight` shifts what matching cares about. Tone transfer can repair an
+ * overall colour mismatch at draw time but can't invent structure, so the
+ * more correction is applied the more matching should favour structure.
+ */
+export function weightFeatures(features: ArrayLike<number>, meanWeight: number): Float32Array {
+  const out = new Float32Array(features.length);
+  const samples = features.length / 3;
+  for (let channel = 0; channel < 3; channel++) {
+    let mean = 0;
+    for (let i = 0; i < samples; i++) mean += features[i * 3 + channel];
+    mean /= samples;
+    for (let i = 0; i < samples; i++) {
+      out[i * 3 + channel] = mean * meanWeight + (features[i * 3 + channel] - mean);
+    }
+  }
+  return out;
+}
+
 /** Plain sRGB average (0..255 per channel) over a whole region, for drawing/colour-correct. */
 export function computeAverageColor(data: Uint8ClampedArray, width: number, height: number): [number, number, number] {
   let r = 0;

@@ -1,23 +1,46 @@
+import { squaredDistance } from './color';
 import { KDTree } from './kdtree';
 import { mulberry32, shuffle } from './rng';
 import type { FeatureVector } from '../types';
 
 const INITIAL_K = 12;
+/** Past this many candidates a better tile is vanishingly unlikely; stop widening unless everything was rejected. */
+const MAX_SCORED_K = 192;
+const SCALE_SAMPLE_CELLS = 256;
+const DEFAULT_REFINE_PASSES = 2;
 
 export interface MatchSettings {
   reuseRadius: number;
+  /**
+   * 0 = pure best colour match; 1 = a photo used its fair share of times
+   * (cells / tiles) costs as much as a typical cell's best-match distance.
+   * Scale-free on purpose: an absolute penalty on squared OKLab distances
+   * swamps the colour signal and turns the mosaic into confetti.
+   */
   usagePenalty: number;
   seed?: number;
+  refinePasses?: number;
 }
 
 /**
- * Matches each grid cell to a tile: query the k-d tree for the nearest
- * candidates, reject any used within a Chebyshev radius R of the cell
- * (kills visible repeats), score the rest by distance + usage penalty, and
- * take the best. Widens K when every candidate is rejected; as a last
- * resort (K already covers every tile) ignores the reuse rule entirely.
- * Cells are visited in a seeded-random order so repeats don't streak along
- * a raster scan.
+ * Largest usable radius <= requested. A cell can only be guaranteed a legal
+ * tile if its neighbourhood is smaller than the library; we also leave half
+ * the library free so the choice isn't forced to terrible matches.
+ */
+export function effectiveReuseRadius(requested: number, tileCount: number): number {
+  let r = Math.max(0, Math.floor(requested));
+  while (r > 0 && (2 * r + 1) * (2 * r + 1) - 1 >= tileCount / 2) r--;
+  return r;
+}
+
+/**
+ * Assigns a tile to each cell: greedy in a seeded-random order (so repeats
+ * don't streak along a raster scan), then refinement passes that re-choose
+ * each cell knowing its whole neighbourhood, recovering the good matches
+ * cells early in the order blocked for cells late in the order.
+ *
+ * Score = distance + normalised usage penalty; no tile repeats within the
+ * effective Chebyshev radius.
  */
 export function matchGrid(
   cols: number,
@@ -37,10 +60,19 @@ export function matchGrid(
     Array.from({ length: cellCount }, (_, i) => i),
     rng,
   );
+  const R = effectiveReuseRadius(settings.reuseRadius, tileCount);
 
-  const R = settings.reuseRadius;
+  // Typical best-match distance across a sample of cells: the unit of the penalty.
+  let distanceScale = 0;
+  const sampleCount = Math.min(SCALE_SAMPLE_CELLS, cellCount);
+  for (let i = 0; i < sampleCount; i++) {
+    distanceScale += tree.nearestK(cellFeatures[order[i]], 1)[0]?.dist ?? 0;
+  }
+  distanceScale = Math.max(distanceScale / Math.max(1, sampleCount), 1e-6);
+  const fairShare = Math.max(1, cellCount / tileCount);
+  const penaltyPerUse = (settings.usagePenalty * distanceScale) / fairShare;
 
-  const isRejected = (cell: number, tileId: number): boolean => {
+  const isBlocked = (cell: number, tileId: number): boolean => {
     if (R <= 0) return false;
     const row = Math.floor(cell / cols);
     const col = cell % cols;
@@ -58,36 +90,62 @@ export function matchGrid(
     return false;
   };
 
-  for (const cell of order) {
+  const choose = (cell: number): number => {
     const feature = cellFeatures[cell];
     let k = Math.min(INITIAL_K, tileCount);
-    let chosen = -1;
-
     for (;;) {
       const candidates = tree.nearestK(feature, k);
-      const ignoreReuse = k >= tileCount;
-
       let bestId = -1;
       let bestScore = Infinity;
+      let farthest = 0;
       for (const cand of candidates) {
-        if (!ignoreReuse && isRejected(cell, cand.id)) continue;
-        const score = cand.dist + settings.usagePenalty * (usage.get(cand.id) ?? 0);
+        if (cand.dist > farthest) farthest = cand.dist;
+        if (isBlocked(cell, cand.id)) continue;
+        const score = cand.dist + penaltyPerUse * (usage.get(cand.id) ?? 0);
         if (score < bestScore) {
           bestScore = score;
           bestId = cand.id;
         }
       }
-
-      if (bestId !== -1) {
-        chosen = bestId;
-        break;
-      }
+      // Any tile outside this set is at least `farthest` away, and penalties
+      // only add, so the current best is optimal once it beats `farthest`.
+      const exhausted = k >= tileCount;
+      if (bestId !== -1 && (exhausted || bestScore <= farthest || k >= MAX_SCORED_K)) return bestId;
+      if (exhausted) return candidates[0].id; // last resort: repeat rather than leave a hole
       k = Math.min(k * 2, tileCount);
     }
+  };
 
-    assignment[cell] = chosen;
-    usage.set(chosen, (usage.get(chosen) ?? 0) + 1);
+  const place = (cell: number): void => {
+    const tileId = choose(cell);
+    assignment[cell] = tileId;
+    usage.set(tileId, (usage.get(tileId) ?? 0) + 1);
+  };
+
+  for (const cell of order) place(cell);
+
+  const passes = settings.refinePasses ?? DEFAULT_REFINE_PASSES;
+  for (let pass = 0; pass < passes; pass++) {
+    for (const cell of order) {
+      const current = assignment[cell];
+      usage.set(current, (usage.get(current) ?? 1) - 1);
+      assignment[cell] = -1;
+      place(cell);
+    }
   }
 
   return assignment;
+}
+
+/** Mean feature distance of an assignment; lower is closer to the target. Used to compare strategies in tests. */
+export function assignmentError(
+  assignment: number[],
+  cellFeatures: FeatureVector[],
+  featuresById: Map<number, FeatureVector>,
+): number {
+  let sum = 0;
+  for (let i = 0; i < assignment.length; i++) {
+    sum += squaredDistance(cellFeatures[i], featuresById.get(assignment[i])!);
+  }
+  return sum / Math.max(1, assignment.length);
 }
