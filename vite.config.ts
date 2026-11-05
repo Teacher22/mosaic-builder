@@ -7,6 +7,12 @@ export default defineConfig({
   worker: {
     format: 'es',
   },
+  server: {
+    open: true,
+  },
+  preview: {
+    open: true,
+  },
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],
