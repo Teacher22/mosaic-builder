@@ -26,4 +26,4 @@ A folder of sample photos + a target image is available in `sample-photos/` (dow
 
 ## Status
 
-Milestone 1 (project skeleton + non-blocking pipeline) is implemented. See [PROJECT.md](PROJECT.md) section 7 for the milestone roadmap.
+Milestones 1-5 are implemented: the core pipeline, OKLab + k-d tree matching with reuse-radius/usage-penalty, an IndexedDB analysis cache + folder picker, high-res strip-rendered export (PNG/JPEG, up to 8000px, verified crash-free), and UI polish (before/after compare, zoom/pan, live low-res preview, colour-correct/blend). M6 (optional native Tauri wrapper) is not done. See [PROJECT.md](PROJECT.md) section 7 for the full milestone spec.
