@@ -1,6 +1,8 @@
-// Module worker: decodes photos to a square thumbnail + feature vector.
-// Runs off the main thread so loading thousands of photos never freezes the UI.
+// Module worker: decodes photos to a feature vector, with an IndexedDB
+// cache keyed by name+size+lastModified so re-selecting the same folder
+// skips decoding entirely.
 import { computeFeatures } from '../core/features';
+import { cacheKey, getManyCached, setManyCached, type CachedFeatures } from '../store/cache';
 import type { AnalyzeRequest, AnalyzeResponse } from '../types';
 
 const THUMB_SIZE = 160;
@@ -26,7 +28,7 @@ async function decodeToBitmap(file: File): Promise<ImageBitmap> {
   }
 }
 
-async function analyzeOne(file: File, id: number): Promise<AnalyzeResponse> {
+async function decodeAndAnalyze(file: File, id: number): Promise<AnalyzeResponse> {
   let bitmap: ImageBitmap | undefined;
   try {
     bitmap = await decodeToBitmap(file);
@@ -43,7 +45,7 @@ async function analyzeOne(file: File, id: number): Promise<AnalyzeResponse> {
     const imageData = ctx.getImageData(0, 0, THUMB_SIZE, THUMB_SIZE);
     const features = computeFeatures(imageData.data, THUMB_SIZE, THUMB_SIZE);
 
-    return { type: 'result', id, name: file.name, features: Array.from(features) };
+    return { type: 'result', id, name: file.name, features: Array.from(features), fromCache: false };
   } catch (err) {
     bitmap?.close();
     return { type: 'skipped', name: file.name, reason: err instanceof Error ? err.message : String(err) };
@@ -52,11 +54,32 @@ async function analyzeOne(file: File, id: number): Promise<AnalyzeResponse> {
 
 self.onmessage = async (ev: MessageEvent<AnalyzeRequest>) => {
   const { files, startId } = ev.data;
+  const post = (self as unknown as Worker).postMessage.bind(self);
+
+  const keys = files.map((f) => cacheKey(f.name, f.size, f.lastModified));
+  const cached = await getManyCached(keys);
+
+  const toCache: [string, CachedFeatures][] = [];
 
   for (let i = 0; i < files.length; i++) {
-    const result = await analyzeOne(files[i], startId + i);
-    (self as unknown as Worker).postMessage(result);
+    const hit = cached[i];
+    let result: AnalyzeResponse;
+
+    if (hit) {
+      result = { type: 'result', id: startId + i, name: files[i].name, features: hit.features, fromCache: true };
+    } else {
+      result = await decodeAndAnalyze(files[i], startId + i);
+      if (result.type === 'result') {
+        toCache.push([keys[i], { features: result.features }]);
+      }
+    }
+
+    post(result);
   }
 
-  (self as unknown as Worker).postMessage({ type: 'done' } satisfies AnalyzeResponse);
+  if (toCache.length > 0) {
+    await setManyCached(toCache);
+  }
+
+  post({ type: 'done' } satisfies AnalyzeResponse);
 };

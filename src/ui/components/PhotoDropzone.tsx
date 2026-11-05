@@ -1,11 +1,61 @@
-import { useCallback, useRef, useState } from 'react';
-import { Box, Button, Chip, Stack, Typography, LinearProgress, Alert, AlertTitle } from '@mui/material';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Box, Button, Chip, Stack, Typography, LinearProgress, Alert, AlertTitle, Tooltip } from '@mui/material';
 import PhotoLibraryOutlinedIcon from '@mui/icons-material/PhotoLibraryOutlined';
+import FolderOpenOutlinedIcon from '@mui/icons-material/FolderOpenOutlined';
+import DeleteSweepOutlinedIcon from '@mui/icons-material/DeleteSweepOutlined';
 import { useMosaicStore } from '../hooks/useMosaicStore';
 import { useWorkers } from '../hooks/useWorkers';
+import { clearCache } from '../../store/cache';
 
 function isImageFile(file: File): boolean {
   return file.type.startsWith('image/') || /\.(heic|heif)$/i.test(file.name);
+}
+
+const THUMB_STRIP_LIMIT = 40;
+
+function ThumbnailStrip({ files }: { files: File[] }) {
+  // Object URLs are a side effect, so they're created/revoked from an
+  // effect (not useMemo, which React may invoke more than once per commit
+  // under StrictMode/concurrent rendering and would leave <img> pointed at
+  // an already-revoked blob URL).
+  const [urls, setUrls] = useState<string[]>([]);
+  useEffect(() => {
+    const created = files.slice(0, THUMB_STRIP_LIMIT).map((f) => URL.createObjectURL(f));
+    setUrls(created);
+    return () => created.forEach((u) => URL.revokeObjectURL(u));
+  }, [files]);
+
+  return (
+    <Stack direction="row" spacing={0.5} sx={{ overflowX: 'auto', pb: 0.5 }}>
+      {urls.map((url, i) => (
+        <Box
+          key={i}
+          component="img"
+          src={url}
+          alt=""
+          sx={{ width: 40, height: 40, objectFit: 'cover', borderRadius: 1, flexShrink: 0, bgcolor: 'action.hover' }}
+        />
+      ))}
+      {files.length > THUMB_STRIP_LIMIT && (
+        <Box
+          sx={{
+            width: 40,
+            height: 40,
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: 1,
+            bgcolor: 'action.hover',
+            fontSize: 11,
+            color: 'text.secondary',
+          }}
+        >
+          +{files.length - THUMB_STRIP_LIMIT}
+        </Box>
+      )}
+    </Stack>
+  );
 }
 
 export function PhotoDropzone() {
@@ -14,9 +64,12 @@ export function PhotoDropzone() {
   const analyzing = useMosaicStore((s) => s.analyzing);
   const analyzeProgress = useMosaicStore((s) => s.analyzeProgress);
   const skippedFiles = useMosaicStore((s) => s.skippedFiles);
+  const cacheHits = useMosaicStore((s) => s.cacheHits);
   const clearPhotos = useMosaicStore((s) => s.clearPhotos);
+  const addLog = useMosaicStore((s) => s.addLog);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const handleFiles = useCallback(
     (fileList: FileList | File[]) => {
@@ -34,6 +87,13 @@ export function PhotoDropzone() {
     },
     [handleFiles],
   );
+
+  const handleClearCache = useCallback(async () => {
+    await clearCache();
+    addLog('info', 'Cleared the photo analysis cache.');
+  }, [addLog]);
+
+  const tileFiles = useMemo(() => tiles.map((t) => t.file), [tiles]);
 
   return (
     <Stack spacing={1.5}>
@@ -66,9 +126,35 @@ export function PhotoDropzone() {
           accept="image/*,.heic,.heif"
           multiple
           hidden
-          onChange={(e) => e.target.files && handleFiles(e.target.files)}
+          onChange={(e) => {
+            if (e.target.files) handleFiles(e.target.files);
+            // Reset so re-selecting the exact same file(s) still fires change.
+            e.target.value = '';
+          }}
         />
       </Box>
+
+      <Button
+        size="small"
+        variant="text"
+        startIcon={<FolderOpenOutlinedIcon fontSize="small" />}
+        onClick={() => folderInputRef.current?.click()}
+        sx={{ alignSelf: 'flex-start' }}
+      >
+        Choose a whole folder
+      </Button>
+      <input
+        ref={folderInputRef}
+        type="file"
+        hidden
+        multiple
+        // @ts-expect-error -- non-standard but supported in Chrome and Safari
+        webkitdirectory=""
+        onChange={(e) => {
+          if (e.target.files) handleFiles(e.target.files);
+          e.target.value = '';
+        }}
+      />
 
       {analyzing && (
         <Box>
@@ -83,9 +169,12 @@ export function PhotoDropzone() {
         </Box>
       )}
 
+      {tiles.length > 0 && !analyzing && <ThumbnailStrip files={tileFiles} />}
+
       {(tiles.length > 0 || skippedFiles.length > 0) && !analyzing && (
         <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
           <Chip size="small" label={`${tiles.length} loaded`} color="primary" variant="outlined" />
+          {cacheHits > 0 && <Chip size="small" label={`${cacheHits} from cache`} variant="outlined" />}
           {skippedFiles.length > 0 && (
             <Chip size="small" label={`${skippedFiles.length} skipped`} color="warning" variant="outlined" />
           )}
@@ -110,6 +199,18 @@ export function PhotoDropzone() {
           )}
         </Alert>
       )}
+
+      <Tooltip title="Forget cached thumbnails/features for all photos, so the next analysis re-decodes everything">
+        <Button
+          size="small"
+          color="inherit"
+          startIcon={<DeleteSweepOutlinedIcon fontSize="small" />}
+          onClick={handleClearCache}
+          sx={{ alignSelf: 'flex-start', color: 'text.secondary' }}
+        >
+          Clear cache
+        </Button>
+      </Tooltip>
     </Stack>
   );
 }

@@ -1,12 +1,15 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   AppBar,
   Box,
   Button,
+  Chip,
   CssBaseline,
   Drawer,
   IconButton,
   Paper,
+  Snackbar,
   Stack,
   ThemeProvider,
   Toolbar,
@@ -29,8 +32,15 @@ import { StageStepper } from './components/StageStepper';
 import { ProgressCard } from './components/ProgressCard';
 import { ActivityLog } from './components/ActivityLog';
 import { ResultSummary } from './components/ResultSummary';
+import { ExportDialog } from './components/ExportDialog';
 
 type Mode = 'light' | 'dark' | 'system';
+
+// Live low-res preview renders at a small width so a slider drag updates
+// within ~1s even on a large photo set; the real Generate click still uses
+// the full settings.outputWidth.
+const LIVE_PREVIEW_WIDTH = 900;
+const LIVE_PREVIEW_DEBOUNCE_MS = 500;
 
 function SidebarSection({ index, title, children }: { index: number; title: string; children: React.ReactNode }) {
   return (
@@ -48,6 +58,8 @@ function Sidebar() {
   const target = useMosaicStore((s) => s.target);
   const analyzing = useMosaicStore((s) => s.analyzing);
   const rendering = useMosaicStore((s) => s.rendering);
+  const resultBitmap = useMosaicStore((s) => s.resultBitmap);
+  const settingsDirty = useMosaicStore((s) => s.settingsDirty);
   const { generate } = useWorkers();
 
   const canGenerate = tiles.length > 0 && !!target && !analyzing && !rendering;
@@ -64,6 +76,17 @@ function Sidebar() {
       <SidebarSection index={3} title="Settings">
         <SettingsPanel />
       </SidebarSection>
+
+      {settingsDirty && resultBitmap && !rendering && (
+        <Chip
+          label="Settings changed. Regenerate"
+          color="warning"
+          variant="outlined"
+          onClick={() => generate()}
+          sx={{ alignSelf: 'center' }}
+        />
+      )}
+
       <Tooltip title={tooltip} disableHoverListener={!tooltip}>
         <span>
           <Button
@@ -71,7 +94,7 @@ function Sidebar() {
             size="large"
             variant="contained"
             disabled={!canGenerate}
-            onClick={generate}
+            onClick={() => generate()}
             startIcon={<AutoAwesomeMosaicOutlinedIcon />}
           >
             Generate
@@ -90,8 +113,32 @@ export default function App() {
 
   const isNarrow = useMediaQuery('(max-width: 1099px)');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
 
   const toggleMode = () => setMode(effectiveMode === 'dark' ? 'light' : 'dark');
+
+  const error = useMosaicStore((s) => s.error);
+  const setError = useMosaicStore((s) => s.setError);
+  const settings = useMosaicStore((s) => s.settings);
+  const { generate } = useWorkers();
+
+  // Live preview: when settings change while a result already exists,
+  // auto-regenerate a quick low-res preview after a short debounce.
+  const settingsKey = JSON.stringify(settings);
+  const isFirstRender = useRef(true);
+  useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    const timer = setTimeout(() => {
+      const s = useMosaicStore.getState();
+      if (!s.livePreview || !s.settingsDirty || !s.target || s.tiles.length === 0 || s.rendering) return;
+      generate({ outputWidthOverride: Math.min(LIVE_PREVIEW_WIDTH, s.settings.outputWidth), quiet: true });
+    }, LIVE_PREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsKey]);
 
   return (
     <ThemeProvider theme={theme}>
@@ -129,7 +176,7 @@ export default function App() {
 
           <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', p: 2, gap: 2, minHeight: 0 }}>
             <StageStepper />
-            <MosaicViewer />
+            <MosaicViewer onOpenExport={() => setExportOpen(true)} />
             <ProgressCard />
             <ResultSummary />
             <ActivityLog />
@@ -144,6 +191,19 @@ export default function App() {
           </Box>
         </Drawer>
       )}
+
+      <ExportDialog open={exportOpen} onClose={() => setExportOpen(false)} />
+
+      <Snackbar
+        open={!!error}
+        autoHideDuration={6000}
+        onClose={() => setError(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+      >
+        <Alert severity="error" variant="filled" onClose={() => setError(null)} sx={{ borderRadius: 2 }}>
+          {error}
+        </Alert>
+      </Snackbar>
     </ThemeProvider>
   );
 }

@@ -63,7 +63,10 @@ export function TargetPicker() {
           type="file"
           accept="image/*"
           hidden
-          onChange={(e) => pick(e.target.files?.[0])}
+          onChange={(e) => {
+            pick(e.target.files?.[0]);
+            e.target.value = '';
+          }}
         />
       </Box>
       {target && (

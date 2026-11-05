@@ -1,4 +1,4 @@
-import { Box, Chip, Slider, Stack, Tooltip, Typography } from '@mui/material';
+import { Box, Chip, FormControlLabel, Slider, Stack, Switch, Tooltip, Typography } from '@mui/material';
 import { useMosaicStore } from '../hooks/useMosaicStore';
 import type { MosaicSettings } from '../../types';
 
@@ -47,6 +47,8 @@ function SliderRow({ label, tooltip, value, min, max, step, unit, onChange, form
 export function SettingsPanel() {
   const settings = useMosaicStore((s) => s.settings);
   const updateSettings = useMosaicStore((s) => s.updateSettings);
+  const livePreview = useMosaicStore((s) => s.livePreview);
+  const setLivePreview = useMosaicStore((s) => s.setLivePreview);
 
   return (
     <Stack spacing={2}>
@@ -83,7 +85,7 @@ export function SettingsPanel() {
       />
       <SliderRow
         label="Repeat radius"
-        tooltip="Avoid reusing the same photo within this many cells (takes effect from Milestone 2)"
+        tooltip="Avoid reusing the same photo within this many cells of each other"
         value={settings.reuseRadius}
         min={0}
         max={12}
@@ -92,7 +94,7 @@ export function SettingsPanel() {
       />
       <SliderRow
         label="Usage penalty"
-        tooltip="How strongly overused photos are discouraged (takes effect from Milestone 2)"
+        tooltip="How strongly overused photos are discouraged when picking the next tile"
         value={settings.usagePenalty}
         min={0}
         max={1}
@@ -102,13 +104,32 @@ export function SettingsPanel() {
       />
       <SliderRow
         label="Colour correct"
-        tooltip="Blend each tile toward the target's colour (takes effect from Milestone 5)"
+        tooltip="Tint each tile toward the target cell's colour, at draw time"
         value={settings.colorCorrect}
         min={0}
         max={0.35}
         step={0.01}
         format={(v) => `${Math.round(v * 100)}%`}
         onChange={(v) => updateSettings({ colorCorrect: v })}
+      />
+      <SliderRow
+        label="Blend"
+        tooltip="Wash the original target image over the finished mosaic, for readability at a distance"
+        value={settings.blend}
+        min={0}
+        max={0.5}
+        step={0.02}
+        format={(v) => `${Math.round(v * 100)}%`}
+        onChange={(v) => updateSettings({ blend: v })}
+      />
+
+      <FormControlLabel
+        control={<Switch size="small" checked={livePreview} onChange={(e) => setLivePreview(e.target.checked)} />}
+        label={
+          <Typography variant="body2" color="text.secondary">
+            Live low-res preview while adjusting
+          </Typography>
+        }
       />
     </Stack>
   );
