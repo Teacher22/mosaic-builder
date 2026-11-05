@@ -146,7 +146,7 @@ export default function App() {
       <Box sx={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
         <AppBar position="static" color="transparent" elevation={0} sx={{ borderBottom: 1, borderColor: 'divider' }}>
           <Toolbar sx={{ gap: 1 }}>
-            <AutoAwesomeMosaicOutlinedIcon color="primary" />
+            <Box component="img" src={`${import.meta.env.BASE_URL}favicon.svg`} alt="" sx={{ width: 28, height: 28, display: 'block' }} />
             <Typography variant="h6" sx={{ flex: 1 }}>
               Mosaic Builder
             </Typography>
