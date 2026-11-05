@@ -3,3 +3,6 @@ dist/
 .DS_Store
 *.log
 .env
+
+# Downloaded sample content for local testing, not part of the source
+sample-photos/
